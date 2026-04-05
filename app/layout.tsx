@@ -25,6 +25,10 @@ export const metadata: Metadata = {
   },
   description:
     "Spending-focused budgeting. Ignite your path to financial independence.",
+  icons: {
+    icon: "/brand/ignite-logo.png",
+    apple: "/brand/ignite-logo.png",
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",

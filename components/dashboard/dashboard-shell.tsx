@@ -116,6 +116,13 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
                 </div>
               </SheetContent>
             </Sheet>
+            <Image
+              src="/brand/ignite-logo.png"
+              alt=""
+              width={28}
+              height={28}
+              className="rounded-md"
+            />
             <span className="font-semibold">Ignite</span>
           </div>
         </header>
