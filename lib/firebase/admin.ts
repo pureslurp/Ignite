@@ -8,16 +8,19 @@ import admin from "firebase-admin";
  */
 function loadServiceAccountRaw(): string | null {
   const pathEnv = process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim();
+  const jsonEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
   if (pathEnv) {
     const p = resolve(process.cwd(), pathEnv);
-    if (!existsSync(p)) {
-      throw new Error(
-        `FIREBASE_SERVICE_ACCOUNT_PATH file not found: ${p}`
-      );
+    if (existsSync(p)) {
+      return readFileSync(p, "utf-8");
     }
-    return readFileSync(p, "utf-8");
+    // Path from local .env but file missing on the host (e.g. Vercel) — use inline JSON.
+    if (jsonEnv) return jsonEnv;
+    throw new Error(
+      `FIREBASE_SERVICE_ACCOUNT_PATH file not found: ${p}. On Vercel set FIREBASE_SERVICE_ACCOUNT_JSON (single-line service account JSON) and remove or omit the path.`
+    );
   }
-  return process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim() || null;
+  return jsonEnv || null;
 }
 
 function init() {
@@ -52,10 +55,14 @@ export function getAdminFirestore() {
 }
 
 export function isAdminConfigured(): boolean {
-  return Boolean(
-    process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim() ||
-      process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim()
-  );
+  const jsonEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  if (jsonEnv) return true;
+  const pathEnv = process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim();
+  if (pathEnv) {
+    const p = resolve(process.cwd(), pathEnv);
+    return existsSync(p);
+  }
+  return false;
 }
 
 /** For diagnostics only — never log the full service account. */
