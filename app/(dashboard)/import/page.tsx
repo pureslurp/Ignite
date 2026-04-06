@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { Fragment, useState, useMemo } from "react";
+import { Folder } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
@@ -34,16 +35,131 @@ import {
   findExistingDuplicateTransaction,
 } from "@/lib/csv/dedupe";
 import { upsertTransaction } from "@/lib/sync/sync-service";
-import { useImportRules, useCategories, useUserSettingsRow } from "@/hooks/use-live-data";
+import {
+  useImportRules,
+  useCategories,
+  useUserSettingsRow,
+  useTransactions,
+} from "@/hooks/use-live-data";
 import { isGoogleSheetMime } from "@/lib/drive/constants";
+import type { DriveImportNode } from "@/lib/drive/import-tree-types";
 import { toast } from "sonner";
 import type { Transaction } from "@/types";
+
+function DriveImportTreeRows({
+  nodes,
+  depth,
+  importedSourceFileNames,
+  driveFileLoadingId,
+  onLoadFile,
+}: {
+  nodes: DriveImportNode[];
+  depth: number;
+  importedSourceFileNames: Set<string>;
+  driveFileLoadingId: string | null;
+  onLoadFile: (fileId: string, name: string) => void;
+}) {
+  const pad = 10 + depth * 14;
+  return (
+    <>
+      {nodes.map((node) =>
+        node.kind === "folder" ? (
+          <Fragment key={`folder-${node.id}`}>
+            <TableRow className="bg-muted/35 hover:bg-muted/35">
+              <TableCell
+                colSpan={4}
+                className="py-2.5 font-medium text-muted-foreground"
+                style={{ paddingLeft: pad }}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Folder
+                    className="size-4 shrink-0 opacity-80"
+                    aria-hidden
+                  />
+                  {node.name}
+                </span>
+              </TableCell>
+            </TableRow>
+            {node.children.length === 0 ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell
+                  colSpan={4}
+                  className="py-1.5 text-muted-foreground text-xs"
+                  style={{ paddingLeft: pad + 14 }}
+                >
+                  Empty folder
+                </TableCell>
+              </TableRow>
+            ) : (
+              <DriveImportTreeRows
+                nodes={node.children}
+                depth={depth + 1}
+                importedSourceFileNames={importedSourceFileNames}
+                driveFileLoadingId={driveFileLoadingId}
+                onLoadFile={onLoadFile}
+              />
+            )}
+          </Fragment>
+        ) : (
+          <TableRow key={node.id}>
+            <TableCell className="font-medium">
+              <span
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"
+                style={{ paddingLeft: pad }}
+              >
+                <span className="min-w-0 break-words">{node.name}</span>
+                {importedSourceFileNames.has(node.name) && (
+                  <span className="shrink-0 text-muted-foreground text-xs font-normal">
+                    Already imported
+                  </span>
+                )}
+              </span>
+              <span className="text-muted-foreground text-xs sm:hidden">
+                {isGoogleSheetMime(node.mimeType) ? "Google Sheet" : "CSV"}
+              </span>
+            </TableCell>
+            <TableCell className="hidden text-muted-foreground sm:table-cell">
+              {isGoogleSheetMime(node.mimeType) ? "Sheet" : "CSV"}
+            </TableCell>
+            <TableCell className="hidden text-muted-foreground sm:table-cell">
+              {node.modifiedTime
+                ? new Date(node.modifiedTime).toLocaleString()
+                : "—"}
+            </TableCell>
+            <TableCell className="text-right">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={driveFileLoadingId === node.id}
+                onClick={() => onLoadFile(node.id, node.name)}
+              >
+                {driveFileLoadingId === node.id ? "Loading…" : "Load"}
+              </Button>
+            </TableCell>
+          </TableRow>
+        )
+      )}
+    </>
+  );
+}
 
 export default function ImportPage() {
   const { user } = useAuth();
   const rules = useImportRules() ?? [];
   const categories = useCategories() ?? [];
+  const transactions = useTransactions();
   const settingsRow = useUserSettingsRow();
+
+  /** File names that already have at least one transaction (exact `originalCsvName`). */
+  const importedSourceFileNames = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of transactions ?? []) {
+      const n = t.originalCsvName?.trim();
+      if (n) s.add(n);
+    }
+    return s;
+  }, [transactions]);
   const driveFolderId = settingsRow?.driveFolderId?.trim() ?? "";
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("");
@@ -59,9 +175,7 @@ export default function ImportPage() {
   });
   const [preview, setPreview] = useState<Transaction[]>([]);
   const [importing, setImporting] = useState(false);
-  const [driveFiles, setDriveFiles] = useState<
-    { id: string; name: string; modifiedTime?: string; mimeType?: string }[]
-  >([]);
+  const [driveTree, setDriveTree] = useState<DriveImportNode[]>([]);
   const [driveListLoading, setDriveListLoading] = useState(false);
   const [driveFileLoadingId, setDriveFileLoadingId] = useState<string | null>(
     null
@@ -100,7 +214,7 @@ export default function ImportPage() {
   async function listDriveCsvs() {
     if (!user || !driveFolderId) return;
     setDriveListLoading(true);
-    setDriveFiles([]);
+    setDriveTree([]);
     try {
       const { getFirebaseAuth } = await import("@/lib/firebase/client");
       const auth = getFirebaseAuth();
@@ -119,19 +233,18 @@ export default function ImportPage() {
         body: JSON.stringify({ folderId: driveFolderId }),
       });
       const data = (await res.json()) as {
-        files?: {
-          id: string;
-          name: string;
-          modifiedTime?: string;
-          mimeType?: string;
-        }[];
+        tree?: DriveImportNode[];
         error?: string;
       };
       if (!res.ok) {
         toast.error(data.error ?? `Could not list files (${res.status})`);
         return;
       }
-      setDriveFiles(data.files ?? []);
+      const tree = Array.isArray(data.tree) ? data.tree : [];
+      setDriveTree(tree);
+      if (tree.length === 0) {
+        toast.message("No CSV or Google Sheet files found in this folder.");
+      }
     } finally {
       setDriveListLoading(false);
     }
@@ -215,6 +328,7 @@ export default function ImportPage() {
         parsed.description,
         parsed.merchant,
         parsed.memo,
+        amountStored,
         rules,
         categories,
         parsed.issuerCategory,
@@ -295,6 +409,7 @@ export default function ImportPage() {
           parsed.description,
           parsed.merchant,
           parsed.memo,
+          amountStored,
           rules,
           categories,
           parsed.issuerCategory,
@@ -356,9 +471,9 @@ export default function ImportPage() {
             <Link href="/settings" className="text-primary underline">
               Settings → Drive
             </Link>
-            . Lists <code className="text-xs">.csv</code> files and Google Sheets;
-            sheets are exported as CSV (first worksheet). Pick a file, then map
-            columns like a local upload.
+            .             Lists <code className="text-xs">.csv</code> files and Google Sheets
+            in this folder and all subfolders; sheets are exported as CSV (first
+            worksheet). Pick a file, then map columns like a local upload.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -382,7 +497,7 @@ export default function ImportPage() {
                   {driveListLoading ? "Listing…" : "List CSV & Sheets"}
                 </Button>
               </div>
-              {driveFiles.length > 0 && (
+              {driveTree.length > 0 && (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -399,37 +514,13 @@ export default function ImportPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {driveFiles.map((f) => (
-                      <TableRow key={f.id}>
-                        <TableCell className="font-medium">
-                          <span className="block">{f.name}</span>
-                          <span className="text-muted-foreground text-xs sm:hidden">
-                            {isGoogleSheetMime(f.mimeType)
-                              ? "Google Sheet"
-                              : "CSV"}
-                          </span>
-                        </TableCell>
-                        <TableCell className="hidden text-muted-foreground sm:table-cell">
-                          {isGoogleSheetMime(f.mimeType) ? "Sheet" : "CSV"}
-                        </TableCell>
-                        <TableCell className="hidden text-muted-foreground sm:table-cell">
-                          {f.modifiedTime
-                            ? new Date(f.modifiedTime).toLocaleString()
-                            : "—"}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={driveFileLoadingId === f.id}
-                            onClick={() => loadFromDriveFile(f.id, f.name)}
-                          >
-                            {driveFileLoadingId === f.id ? "Loading…" : "Load"}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    <DriveImportTreeRows
+                      nodes={driveTree}
+                      depth={0}
+                      importedSourceFileNames={importedSourceFileNames}
+                      driveFileLoadingId={driveFileLoadingId}
+                      onLoadFile={loadFromDriveFile}
+                    />
                   </TableBody>
                 </Table>
               )}

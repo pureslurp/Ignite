@@ -157,23 +157,39 @@ function matchRule(text: string, rule: ImportRule): boolean {
   return hay.includes(pat);
 }
 
+/** Compare stored currency amounts (avoids float noise). */
+export function amountsEqualForRule(a: number, b: number): boolean {
+  return Math.round(a * 100) === Math.round(b * 100);
+}
+
+function amountMatchesRule(rule: ImportRule, amount: number): boolean {
+  if (rule.matchAmount === undefined) return true;
+  return amountsEqualForRule(amount, rule.matchAmount);
+}
+
 /** Escape a string for use inside a RegExp (e.g. exact description match). */
 export function escapeRegexChars(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Whether an import rule matches a single transaction description (import blob = description only). */
-export function importRuleMatchesDescription(
+/**
+ * Whether a rule matches a transaction for “apply to existing” flows (description only;
+ * import still matches description + merchant + memo).
+ */
+export function importRuleMatchesTransaction(
   rule: ImportRule,
-  description: string
+  description: string,
+  amount: number
 ): boolean {
-  return matchRule(description, rule);
+  if (!matchRule(description, rule)) return false;
+  return amountMatchesRule(rule, amount);
 }
 
 export function applyImportRules(
   description: string,
   merchant: string | undefined,
   memo: string | undefined,
+  amount: number,
   rules: ImportRule[],
   categories: Category[],
   issuerCategory?: string,
@@ -202,6 +218,7 @@ export function applyImportRules(
 
   for (const rule of sorted) {
     if (!matchRule(blob, rule)) continue;
+    if (!amountMatchesRule(rule, amount)) continue;
     const a: ImportRuleAction = rule.action;
     if (a.type === "set_category") {
       categoryId = a.categoryId;

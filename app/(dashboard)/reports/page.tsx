@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { format, subMonths } from "date-fns";
 import { useTransactions, useCategories, useSpendingTotals } from "@/hooks/use-live-data";
+import { spendingAmountForTransaction } from "@/lib/spending-amount";
 import {
   Table,
   TableBody,
@@ -29,7 +30,7 @@ export default function ReportsPage() {
     for (const t of transactions) {
       if (!t.countsTowardSpending) continue;
       const mo = t.date.slice(0, 7);
-      m[mo] = (m[mo] ?? 0) + t.amount;
+      m[mo] = (m[mo] ?? 0) + spendingAmountForTransaction(t);
     }
     return m;
   }, [transactions]);

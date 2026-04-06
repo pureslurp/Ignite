@@ -24,6 +24,9 @@ import { Button } from "@/components/ui/button";
 import { useTransactions, useCategories } from "@/hooks/use-live-data";
 import { format, parseISO } from "date-fns";
 import type { Transaction } from "@/types";
+import { UNCATEGORIZED_ID } from "@/lib/constants";
+import { spendingAmountForTransaction } from "@/lib/spending-amount";
+import { cn } from "@/lib/utils";
 
 function spendingTransactions(tx: Transaction[] | undefined) {
   return tx?.filter((t) => t.countsTowardSpending) ?? [];
@@ -33,7 +36,7 @@ function sumByCategory(rows: Transaction[]): Map<string, number> {
   const m = new Map<string, number>();
   for (const t of rows) {
     const k = t.categoryId ?? "none";
-    m.set(k, (m.get(k) ?? 0) + t.amount);
+    m.set(k, (m.get(k) ?? 0) + spendingAmountForTransaction(t));
   }
   return m;
 }
@@ -43,6 +46,32 @@ function fmtUsd(n: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+/** YoY spending change: lower spend than prior year → green; higher → red. */
+function pctChangeClass(pct: number) {
+  if (pct > 0) return "text-red-600 dark:text-red-400";
+  if (pct < 0) return "text-green-600 dark:text-green-400";
+  return "text-muted-foreground";
+}
+
+function CategoryColorSwatch({
+  color,
+  className,
+}: {
+  color: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-block size-2.5 shrink-0 rounded-sm border border-border/90 shadow-sm dark:border-border/50",
+        className
+      )}
+      style={{ backgroundColor: color }}
+      aria-hidden
+    />
+  );
 }
 
 const CATEGORY_TABLE_TOP_N = 10;
@@ -56,6 +85,17 @@ export default function DashboardPage() {
     () => new Map(categories?.map((c) => [c.id, c.name]) ?? []),
     [categories]
   );
+
+  /** Rollup key "none" = uncategorized; match seeded category color when present. */
+  const categoryColorById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of categories ?? []) {
+      m.set(c.id, c.color);
+    }
+    const unc = categories?.find((c) => c.id === UNCATEGORIZED_ID);
+    m.set("none", unc?.color ?? "#94a3b8");
+    return m;
+  }, [categories]);
 
   const spending = useMemo(
     () => spendingTransactions(transactions),
@@ -95,13 +135,14 @@ export default function DashboardPage() {
     const m: Record<string, number> = {};
     for (const t of spendingInYear) {
       const k = t.categoryId ?? "none";
-      m[k] = (m[k] ?? 0) + t.amount;
+      m[k] = (m[k] ?? 0) + spendingAmountForTransaction(t);
     }
     return m;
   }, [spendingInYear]);
 
   const yearTotal = useMemo(
-    () => spendingInYear.reduce((s, t) => s + t.amount, 0),
+    () =>
+      spendingInYear.reduce((s, t) => s + spendingAmountForTransaction(t), 0),
     [spendingInYear]
   );
 
@@ -130,7 +171,7 @@ export default function DashboardPage() {
       const set = new Set(keys);
       const sum = spendingInYear
         .filter((t) => set.has(t.date.slice(0, 7)))
-        .reduce((s, t) => s + t.amount, 0);
+        .reduce((s, t) => s + spendingAmountForTransaction(t), 0);
       let rangeLabel = "";
       if (keys.length === 1) {
         rangeLabel = format(parseISO(`${keys[0]}-01`), "MMM yyyy");
@@ -161,6 +202,33 @@ export default function DashboardPage() {
 
   const monthCountForAvg = Math.max(1, distinctMonthsInYear.length);
 
+  const prevCalendarYear = selectedYear - 1;
+
+  const spendingInPrevYear = useMemo(
+    () => spending.filter((t) => t.date.startsWith(`${prevCalendarYear}-`)),
+    [spending, prevCalendarYear]
+  );
+
+  const byCategoryPrevYear = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const t of spendingInPrevYear) {
+      const k = t.categoryId ?? "none";
+      m[k] = (m[k] ?? 0) + spendingAmountForTransaction(t);
+    }
+    return m;
+  }, [spendingInPrevYear]);
+
+  const distinctMonthsInPrevYear = useMemo(() => {
+    const s = new Set(spendingInPrevYear.map((t) => t.date.slice(0, 7)));
+    return [...s].sort();
+  }, [spendingInPrevYear]);
+
+  const prevYearMonthlyBaselineAvailable = distinctMonthsInPrevYear.length > 0;
+  const monthCountForAvgPrevYear = Math.max(
+    1,
+    distinctMonthsInPrevYear.length
+  );
+
   /** Same month number as today, in the selected year (for “this month” column). */
   const comparisonMonthStr = useMemo(() => {
     const m = new Date().getMonth() + 1;
@@ -183,19 +251,43 @@ export default function DashboardPage() {
       .map(([id, value]) => {
         const total = Math.round(value * 100) / 100;
         const thisMo = spendingInComparisonMonth.get(id) ?? 0;
+        const avgMonthly = total / monthCountForAvg;
+        const totalPrev = byCategoryPrevYear[id] ?? 0;
+        const prevYearAvgMonthly = prevYearMonthlyBaselineAvailable
+          ? Math.round(
+              (totalPrev / monthCountForAvgPrevYear) * 100
+            ) / 100
+          : null;
+        let pctVsPrevYear: number | null = null;
+        if (
+          prevYearAvgMonthly != null &&
+          prevYearAvgMonthly > 0 &&
+          avgMonthly >= 0
+        ) {
+          pctVsPrevYear =
+            Math.round(
+              ((avgMonthly - prevYearAvgMonthly) / prevYearAvgMonthly) *
+                10000
+            ) / 100;
+        }
         return {
           id,
           name: catMap.get(id) ?? (id === "none" ? "Uncategorized" : id),
           total,
           thisMonth: Math.round(thisMo * 100) / 100,
-          avgMonthly: total / monthCountForAvg,
+          avgMonthly,
+          prevYearAvgMonthly,
+          pctVsPrevYear,
         };
       })
       .sort((a, b) => b.total - a.total);
   }, [
     byCategoryYear,
+    byCategoryPrevYear,
     catMap,
     monthCountForAvg,
+    monthCountForAvgPrevYear,
+    prevYearMonthlyBaselineAvailable,
     spendingInComparisonMonth,
   ]);
 
@@ -203,17 +295,36 @@ export default function DashboardPage() {
     let thisMonth = 0;
     let allTime = 0;
     let avgSum = 0;
+    let prevYearAvgSum = 0;
     for (const r of categoryRows) {
       thisMonth += r.thisMonth;
       allTime += r.total;
       avgSum += r.avgMonthly;
+      if (r.prevYearAvgMonthly != null) {
+        prevYearAvgSum += r.prevYearAvgMonthly;
+      }
+    }
+    let pctVsPrevYearTotal: number | null = null;
+    if (
+      prevYearMonthlyBaselineAvailable &&
+      prevYearAvgSum > 0 &&
+      avgSum >= 0
+    ) {
+      pctVsPrevYearTotal =
+        Math.round(
+          ((avgSum - prevYearAvgSum) / prevYearAvgSum) * 10000
+        ) / 100;
     }
     return {
       thisMonth: Math.round(thisMonth * 100) / 100,
       allTime: Math.round(allTime * 100) / 100,
       avgSum: Math.round(avgSum * 100) / 100,
+      prevYearAvgSum: prevYearMonthlyBaselineAvailable
+        ? Math.round(prevYearAvgSum * 100) / 100
+        : null,
+      pctVsPrevYearTotal,
     };
-  }, [categoryRows]);
+  }, [categoryRows, prevYearMonthlyBaselineAvailable]);
 
   const monthOptionsInYear = useMemo(() => {
     const s = new Set(spendingInYear.map((t) => t.date.slice(0, 7)));
@@ -222,6 +333,7 @@ export default function DashboardPage() {
 
   const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [categoryTableExpanded, setCategoryTableExpanded] = useState(false);
+  const [compareAvgToPrevYear, setCompareAvgToPrevYear] = useState(false);
 
   useEffect(() => {
     if (!monthOptionsInYear.length) {
@@ -300,7 +412,7 @@ export default function DashboardPage() {
   const comparisonMonthSpend = useMemo(() => {
     return spendingInYear
       .filter((t) => t.date.startsWith(comparisonMonthStr))
-      .reduce((s, t) => s + t.amount, 0);
+      .reduce((s, t) => s + spendingAmountForTransaction(t), 0);
   }, [spendingInYear, comparisonMonthStr]);
 
   const displayedCategoryRows =
@@ -311,6 +423,12 @@ export default function DashboardPage() {
   const comparisonMonthLabel = isViewingCurrentCalendarYear
     ? "This month (spending)"
     : `${comparisonMonthStr} (spending)`;
+
+  const showCompareInAvgColumn =
+    compareAvgToPrevYear && prevYearMonthlyBaselineAvailable;
+
+  const avgMonthColClass =
+    "text-right whitespace-nowrap align-middle tabular-nums text-muted-foreground";
 
   return (
     <div className="space-y-8">
@@ -415,6 +533,14 @@ export default function DashboardPage() {
               {distinctMonthsInYear.length || 1} month
               {distinctMonthsInYear.length === 1 ? "" : "s"} with spending in{" "}
               {selectedYear}).
+              {prevYearMonthlyBaselineAvailable ? (
+                <>
+                  {" "}
+                  Turn on <span className="font-medium">Compare</span> to show{" "}
+                  {prevCalendarYear} monthly average and percent change (lower is
+                  green, higher is red).
+                </>
+              ) : null}{" "}
               {categoryRows.length > CATEGORY_TABLE_TOP_N && !categoryTableExpanded && (
                 <>
                   {" "}
@@ -424,18 +550,41 @@ export default function DashboardPage() {
               )}
             </CardDescription>
           </div>
-          {categoryRows.length > CATEGORY_TABLE_TOP_N && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0 self-start"
-              onClick={() => setCategoryTableExpanded((e) => !e)}
-            >
-              {categoryTableExpanded
-                ? `Show top ${CATEGORY_TABLE_TOP_N}`
-                : "Expand all"}
-            </Button>
+          {(prevYearMonthlyBaselineAvailable ||
+            categoryRows.length > CATEGORY_TABLE_TOP_N) && (
+            <div className="flex flex-wrap items-center gap-2 self-start">
+              {prevYearMonthlyBaselineAvailable && (
+                <Button
+                  type="button"
+                  variant={compareAvgToPrevYear ? "secondary" : "outline"}
+                  size="sm"
+                  className="shrink-0"
+                  aria-pressed={compareAvgToPrevYear}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCompareAvgToPrevYear((v) => !v);
+                  }}
+                >
+                  Compare
+                </Button>
+              )}
+              {categoryRows.length > CATEGORY_TABLE_TOP_N && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCategoryTableExpanded((exp) => !exp);
+                  }}
+                >
+                  {categoryTableExpanded
+                    ? `Show top ${CATEGORY_TABLE_TOP_N}`
+                    : "Expand all"}
+                </Button>
+              )}
+            </div>
           )}
         </CardHeader>
         <CardContent>
@@ -445,17 +594,32 @@ export default function DashboardPage() {
             </p>
           ) : (
             <div className="overflow-x-auto rounded-md border border-border">
-              <Table>
+              <Table className="table-fixed">
+                <colgroup>
+                  <col className="w-[34%]" />
+                  <col className="w-[22%]" />
+                  <col className="w-[22%]" />
+                  <col className="w-[22%]" />
+                </colgroup>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Category</TableHead>
+                    <TableHead className="min-w-0">Category</TableHead>
                     <TableHead className="text-right whitespace-nowrap">
                       {isViewingCurrentCalendarYear
                         ? `${comparisonMonthStr} (now)`
                         : comparisonMonthStr}
                     </TableHead>
                     <TableHead className="text-right">Total</TableHead>
-                    <TableHead className="text-right">Avg / month</TableHead>
+                    <TableHead className="text-right whitespace-nowrap align-middle">
+                      <span className="inline-flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                        <span>Avg / month</span>
+                        {showCompareInAvgColumn && (
+                          <span className="text-xs font-normal text-muted-foreground whitespace-nowrap">
+                            vs {prevCalendarYear}
+                          </span>
+                        )}
+                      </span>
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -480,30 +644,94 @@ export default function DashboardPage() {
                         }
                       }}
                     >
-                      <TableCell className="font-medium">{r.name}</TableCell>
+                      <TableCell className="min-w-0 font-medium">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <CategoryColorSwatch
+                            className="shrink-0"
+                            color={
+                              categoryColorById.get(r.id) ?? "#cbd5e1"
+                            }
+                          />
+                          <span className="min-w-0 truncate">{r.name}</span>
+                        </span>
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {fmtUsd(r.thisMonth)}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {fmtUsd(r.total)}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums text-muted-foreground">
-                        {fmtUsd(r.avgMonthly)}
+                      <TableCell className={avgMonthColClass}>
+                        <div className="inline-flex max-w-full flex-col items-end gap-0.5 sm:flex-row sm:flex-nowrap sm:items-baseline sm:gap-x-3 sm:gap-y-0">
+                          <span className="shrink-0 tabular-nums text-foreground">
+                            {fmtUsd(r.avgMonthly)}
+                          </span>
+                          {compareAvgToPrevYear && r.prevYearAvgMonthly != null && (
+                            <span className="text-xs text-muted-foreground">
+                              {fmtUsd(r.prevYearAvgMonthly)} in {prevCalendarYear}
+                              {r.pctVsPrevYear != null && (
+                                <span
+                                  className={cn(
+                                    "font-medium",
+                                    pctChangeClass(r.pctVsPrevYear)
+                                  )}
+                                >
+                                  {" "}
+                                  (
+                                  {r.pctVsPrevYear > 0 ? "+" : ""}
+                                  {r.pctVsPrevYear.toFixed(0)}%)
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
                 <TableFooter>
                   <TableRow>
-                    <TableCell>Total</TableCell>
+                    <TableCell className="min-w-0 font-medium">Total</TableCell>
                     <TableCell className="text-right tabular-nums">
                       {fmtUsd(categoryColumnTotals.thisMonth)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {fmtUsd(categoryColumnTotals.allTime)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {fmtUsd(categoryColumnTotals.avgSum)}
+                    <TableCell className={avgMonthColClass}>
+                      <div className="inline-flex max-w-full flex-col items-end gap-0.5 sm:flex-row sm:flex-nowrap sm:items-baseline sm:gap-x-3 sm:gap-y-0">
+                        <span className="shrink-0 tabular-nums text-foreground">
+                          {fmtUsd(categoryColumnTotals.avgSum)}
+                        </span>
+                        {compareAvgToPrevYear &&
+                          categoryColumnTotals.prevYearAvgSum != null && (
+                            <span className="text-xs text-muted-foreground">
+                              {fmtUsd(categoryColumnTotals.prevYearAvgSum)} in{" "}
+                              {prevCalendarYear}
+                              {categoryColumnTotals.pctVsPrevYearTotal !=
+                                null && (
+                                <span
+                                  className={cn(
+                                    "font-medium",
+                                    pctChangeClass(
+                                      categoryColumnTotals.pctVsPrevYearTotal
+                                    )
+                                  )}
+                                >
+                                  {" "}
+                                  (
+                                  {categoryColumnTotals.pctVsPrevYearTotal > 0
+                                    ? "+"
+                                    : ""}
+                                  {categoryColumnTotals.pctVsPrevYearTotal.toFixed(
+                                    0
+                                  )}
+                                  %)
+                                </span>
+                              )}
+                            </span>
+                          )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 </TableFooter>
@@ -571,7 +799,16 @@ export default function DashboardPage() {
                 <TableBody>
                   {monthDetailRows.map((r) => (
                     <TableRow key={r.id}>
-                      <TableCell className="font-medium">{r.name}</TableCell>
+                      <TableCell className="font-medium">
+                        <span className="inline-flex items-center gap-2">
+                          <CategoryColorSwatch
+                            color={
+                              categoryColorById.get(r.id) ?? "#cbd5e1"
+                            }
+                          />
+                          {r.name}
+                        </span>
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {fmtUsd(r.monthSpend)}
                       </TableCell>

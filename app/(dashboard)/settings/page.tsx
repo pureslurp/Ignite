@@ -30,6 +30,11 @@ import {
 import { getDexie } from "@/lib/db/dexie";
 import { decodeBase64UrlUtf8 } from "@/lib/debug-base64url";
 import { driveFileOpenUrl, isGoogleSheetMime } from "@/lib/drive/constants";
+import type { DriveImportNode } from "@/lib/drive/import-tree-types";
+import {
+  flattenDriveImportTree,
+  type DriveImportFlatRow,
+} from "@/lib/drive/flatten-import-tree";
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import {
   Table,
@@ -141,15 +146,9 @@ export default function SettingsPage() {
   const settingsRow = useUserSettingsRow();
   const [driveFolderIdInput, setDriveFolderIdInput] = useState("");
   const [driveListLoading, setDriveListLoading] = useState(false);
-  const [driveFiles, setDriveFiles] = useState<
-    {
-      id: string;
-      name: string;
-      modifiedTime?: string;
-      size?: string;
-      mimeType?: string;
-    }[]
-  >([]);
+  const [driveListFiles, setDriveListFiles] = useState<DriveImportFlatRow[]>(
+    []
+  );
   const [settingsTab, setSettingsTab] = useState("categories");
   const [newCat, setNewCat] = useState({ name: "", color: "#FF4500" });
   const [ruleForm, setRuleForm] = useState<{
@@ -157,11 +156,14 @@ export default function SettingsPage() {
     categoryId: string;
     exclude: boolean;
     matchType: ImportRule["matchType"];
+    /** Empty = no amount filter; otherwise must equal this amount (dollars). */
+    matchAmount: string;
   }>({
     pattern: "",
     categoryId: "",
     exclude: false,
     matchType: "contains",
+    matchAmount: "",
   });
 
   useEffect(() => {
@@ -243,11 +245,22 @@ export default function SettingsPage() {
       toast.error("Pick a category or enable investment exclusion");
       return;
     }
+    let matchAmount: number | undefined;
+    const amtRaw = ruleForm.matchAmount.trim();
+    if (amtRaw !== "") {
+      const n = parseFloat(amtRaw);
+      if (Number.isNaN(n)) {
+        toast.error("Amount must be a number (or leave blank).");
+        return;
+      }
+      matchAmount = Math.round(n * 100) / 100;
+    }
     const r: ImportRule = {
       id: crypto.randomUUID(),
       priority: rules.length,
       pattern: ruleForm.pattern.trim(),
       matchType: ruleForm.matchType,
+      ...(matchAmount !== undefined ? { matchAmount } : {}),
       action: ruleForm.exclude
         ? { type: "exclude_spending", reason: "investment" }
         : { type: "set_category", categoryId: ruleForm.categoryId },
@@ -260,6 +273,7 @@ export default function SettingsPage() {
       categoryId: "",
       exclude: false,
       matchType: "contains",
+      matchAmount: "",
     });
     toast.success("Rule added");
   }
@@ -406,7 +420,7 @@ export default function SettingsPage() {
       return;
     }
     setDriveListLoading(true);
-    setDriveFiles([]);
+    setDriveListFiles([]);
     try {
       const token = await u.getIdToken(true);
       const res = await fetch("/api/drive/list", {
@@ -418,24 +432,20 @@ export default function SettingsPage() {
         body: JSON.stringify({ folderId }),
       });
       const data = (await res.json()) as {
-        files?: {
-          id: string;
-          name: string;
-          modifiedTime?: string;
-          size?: string;
-          mimeType?: string;
-        }[];
+        tree?: DriveImportNode[];
         error?: string;
       };
       if (!res.ok) {
         toast.error(data.error ?? `Could not list files (${res.status})`);
         return;
       }
-      setDriveFiles(data.files ?? []);
-      if ((data.files ?? []).length === 0) {
+      const tree = Array.isArray(data.tree) ? data.tree : [];
+      const flat = flattenDriveImportTree(tree);
+      setDriveListFiles(flat);
+      if (flat.length === 0) {
         toast.message("No CSV or Google Sheets found", {
           description:
-            "Add .csv files or Google Sheets to this folder, then list again.",
+            "Add .csv files or Google Sheets to this folder or subfolders, then list again.",
         });
       }
     } finally {
@@ -529,6 +539,11 @@ export default function SettingsPage() {
                       <span className="rounded border border-border px-1.5 py-0.5">
                         {matchTypeLabel(r.matchType)}
                       </span>
+                      {r.matchAmount !== undefined && (
+                        <span className="rounded border border-border px-1.5 py-0.5 tabular-nums">
+                          Amount = ${r.matchAmount.toFixed(2)}
+                        </span>
+                      )}
                       <span>
                         {r.action.type === "exclude_spending"
                           ? "Exclude from spending"
@@ -608,6 +623,25 @@ export default function SettingsPage() {
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label>Amount (optional)</Label>
+                  <Input
+                    inputMode="decimal"
+                    value={ruleForm.matchAmount}
+                    onChange={(e) =>
+                      setRuleForm((f) => ({
+                        ...f,
+                        matchAmount: e.target.value,
+                      }))
+                    }
+                    placeholder="e.g. 12.34 — only when amount matches too"
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    Leave blank to match on text only. When set, the rule applies
+                    only if the description matches and the transaction amount equals
+                    this value.
+                  </p>
+                </div>
                 <div className="flex items-center gap-2 sm:col-span-2">
                   <Switch
                     id="ex"
@@ -658,8 +692,8 @@ export default function SettingsPage() {
               <CardDescription>
                 Connect Google, then paste the ID of the folder that holds bank CSV
                 exports and/or Google Sheets. Listing includes{" "}
-                <code className="text-xs">text/csv</code> files and native Sheets
-                (import uses the first worksheet as CSV).
+                <code className="text-xs">text/csv</code> files and native Sheets in
+                this folder and subfolders (import uses the first worksheet as CSV).
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -698,7 +732,7 @@ export default function SettingsPage() {
                   {driveListLoading ? "Listing…" : "List CSV & Sheets"}
                 </Button>
               </div>
-              {driveFiles.length > 0 && (
+              {driveListFiles.length > 0 && (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -709,10 +743,10 @@ export default function SettingsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {driveFiles.map((f) => (
+                    {driveListFiles.map((f) => (
                       <TableRow key={f.id}>
                         <TableCell className="font-medium">
-                          <span className="block">{f.name}</span>
+                          <span className="block break-words">{f.pathLabel}</span>
                           <span className="text-muted-foreground text-xs sm:hidden">
                             {isGoogleSheetMime(f.mimeType)
                               ? "Google Sheet"

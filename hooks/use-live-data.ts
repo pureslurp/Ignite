@@ -10,6 +10,7 @@ import type {
   BudgetMonth,
   UserSettings,
 } from "@/types";
+import { spendingAmountForTransaction } from "@/lib/spending-amount";
 
 export function useTransactions() {
   return useLiveQuery(
@@ -52,9 +53,10 @@ export function useSpendingTotals(transactions: Transaction[] | undefined) {
   const byCategory: Record<string, number> = {};
   for (const t of transactions) {
     if (!t.countsTowardSpending) continue;
-    total += t.amount;
+    const amt = spendingAmountForTransaction(t);
+    total += amt;
     const k = t.categoryId ?? "none";
-    byCategory[k] = (byCategory[k] ?? 0) + t.amount;
+    byCategory[k] = (byCategory[k] ?? 0) + amt;
   }
   return { total, byCategory };
 }

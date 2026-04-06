@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminAuth, getAdminFirestore, isAdminConfigured } from "@/lib/firebase/admin";
-import { driveListQueryForFolder } from "@/lib/drive/constants";
+import { buildDriveImportTree } from "@/lib/drive/folder-tree";
 import { getDriveClient } from "@/lib/drive/google-client";
 
 export async function POST(req: NextRequest) {
@@ -30,14 +30,9 @@ export async function POST(req: NextRequest) {
     }
 
     const drive = await getDriveClient(refresh);
-    const res = await drive.files.list({
-      q: driveListQueryForFolder(folderId),
-      fields: "files(id, name, modifiedTime, size, mimeType)",
-      orderBy: "modifiedTime desc",
-      pageSize: 50,
-    });
+    const tree = await buildDriveImportTree(drive, folderId);
 
-    return NextResponse.json({ files: res.data.files ?? [] });
+    return NextResponse.json({ tree });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Drive list failed";
     console.error("[ignite][api/drive/list]", e);

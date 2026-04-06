@@ -41,6 +41,13 @@ function txFromDoc(id: string, data: Record<string, unknown>): Transaction {
       typeof data.notes === "string" && data.notes.length > 0
         ? data.notes
         : undefined,
+    ...((): Record<string, unknown> => {
+      const raw = data.splitExcludedAmount;
+      if (raw == null || raw === "") return {};
+      const n = Number(raw);
+      if (Number.isNaN(n) || n <= 0) return {};
+      return { splitExcludedAmount: n };
+    })(),
     createdAt: Number(data.createdAt ?? Date.now()),
     updatedAt: Number(data.updatedAt ?? Date.now()),
   };
@@ -136,11 +143,15 @@ export async function pullAllFromFirestore(uid: string): Promise<void> {
   const rules = ruleSnap.docs
     .map((d) => {
       const data = d.data();
+      const matchAmountRaw = data.matchAmount;
       return {
         id: d.id,
         priority: Number(data.priority ?? 0),
         pattern: String(data.pattern ?? ""),
         matchType: (data.matchType as ImportRule["matchType"]) ?? "contains",
+        ...(matchAmountRaw !== undefined && matchAmountRaw !== null
+          ? { matchAmount: Number(matchAmountRaw) }
+          : {}),
         action: data.action as ImportRule["action"],
         createdAt: Number(data.createdAt ?? Date.now()),
         updatedAt: Number(data.updatedAt ?? Date.now()),
@@ -186,6 +197,8 @@ export async function upsertTransaction(uid: string, t: Transaction): Promise<vo
   const db = getFirestoreDb();
   const dexie = getDexie();
   const ref = doc(db, "users", uid, "transactions", t.id);
+  // IndexedDB first so useLiveQuery updates the UI immediately; then sync to Firestore.
+  await dexie.transactions.put(t);
   await setDoc(ref, {
     date: t.date,
     amount: t.amount,
@@ -197,20 +210,24 @@ export async function upsertTransaction(uid: string, t: Transaction): Promise<vo
     originalCsvName: t.originalCsvName ?? null,
     dedupeHash: t.dedupeHash ?? null,
     notes: t.notes?.trim() ? t.notes.trim() : null,
+    splitExcludedAmount:
+      t.splitExcludedAmount != null && t.splitExcludedAmount > 0
+        ? t.splitExcludedAmount
+        : null,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
   });
-  await dexie.transactions.put(t);
 }
 
 export async function deleteTransaction(uid: string, id: string): Promise<void> {
   const db = getFirestoreDb();
-  await deleteDoc(doc(db, "users", uid, "transactions", id));
   await getDexie().transactions.delete(id);
+  await deleteDoc(doc(db, "users", uid, "transactions", id));
 }
 
 export async function upsertCategory(uid: string, c: Category): Promise<void> {
   const db = getFirestoreDb();
+  await getDexie().categories.put(c);
   await setDoc(doc(db, "users", uid, "categories", c.id), {
     name: c.name,
     color: c.color,
@@ -219,18 +236,18 @@ export async function upsertCategory(uid: string, c: Category): Promise<void> {
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
   });
-  await getDexie().categories.put(c);
 }
 
 export async function deleteCategory(uid: string, id: string): Promise<void> {
   if (id === UNCATEGORIZED_ID) return;
   const db = getFirestoreDb();
-  await deleteDoc(doc(db, "users", uid, "categories", id));
   await getDexie().categories.delete(id);
+  await deleteDoc(doc(db, "users", uid, "categories", id));
 }
 
 export async function upsertImportRule(uid: string, r: ImportRule): Promise<void> {
   const db = getFirestoreDb();
+  await getDexie().importRules.put(r);
   await setDoc(doc(db, "users", uid, "importRules", r.id), {
     priority: r.priority,
     pattern: r.pattern,
@@ -238,24 +255,24 @@ export async function upsertImportRule(uid: string, r: ImportRule): Promise<void
     action: r.action,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    ...(r.matchAmount !== undefined ? { matchAmount: r.matchAmount } : {}),
   });
-  await getDexie().importRules.put(r);
 }
 
 export async function deleteImportRule(uid: string, id: string): Promise<void> {
   const db = getFirestoreDb();
-  await deleteDoc(doc(db, "users", uid, "importRules", id));
   await getDexie().importRules.delete(id);
+  await deleteDoc(doc(db, "users", uid, "importRules", id));
 }
 
 export async function upsertBudgetMonth(uid: string, b: BudgetMonth): Promise<void> {
   const db = getFirestoreDb();
+  await getDexie().budgets.put(b);
   await setDoc(doc(db, "users", uid, "budgets", b.month), {
     month: b.month,
     categoryBudgets: b.categoryBudgets,
     updatedAt: b.updatedAt,
   });
-  await getDexie().budgets.put(b);
 }
 
 export async function saveUserSettings(
@@ -270,8 +287,8 @@ export async function saveUserSettings(
     ...partial,
     updatedAt: Date.now(),
   };
+  await getDexie().settings.put({ key: "default", ...merged });
   await setDoc(doc(db, "users", uid, "settings", "default"), merged, {
     merge: true,
   });
-  await getDexie().settings.put({ key: "default", ...merged });
 }
