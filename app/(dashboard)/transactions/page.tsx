@@ -1530,7 +1530,7 @@ function TransactionsPageContent() {
             <div className="hidden md:block">
               <div
                 ref={tableScrollParentRef}
-                className="max-h-[min(70vh,calc(100vh-12rem))] overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+                className="max-h-[min(70vh,calc(100vh-12rem))] overflow-x-auto overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
               >
               <Table
                 className={cn(
